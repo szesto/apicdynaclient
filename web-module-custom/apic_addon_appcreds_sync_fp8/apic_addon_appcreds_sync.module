@@ -1,0 +1,590 @@
+<?php
+
+use Drupal\Core\Routing\RouteMatchInterface;
+use Drupal\node\NodeInterface;
+
+//
+// client env, will be loaded from configuration
+//
+
+define('IS_APIC_TEST', False);
+
+define('APIC_DYNA_CLIENT_HOST', '');
+define('APIC_DYNA_CLIENT_PATH', '');
+
+define('APIC_BEARER_TOKEN_PATH','');
+define('APIC_BEARER_TOKEN_CLIENT_ID', '');
+define('APIC_BEARER_TOKEN_CLIENT_SECRET', '');
+define('APIC_BEARER_TOKEN_USER_NAME', '');
+define('APIC_BEARER_TOKEN_PASSWORD', '');
+define('APIC_BEARER_TOKEN_SCOPE', '');
+
+define('APIC_TEST_X_IBM_CLIENT_ID', '');
+
+define('APIC_TEST_ANALYTICS_URL', '');
+
+//
+// end-of client-env
+//
+
+// log channel
+define('APIC_APPCREDS_SYNC_LOG_CHANNEL', 'apic_app');
+
+function appcreds_sync_log_error($message, $context = array()) {
+  \Drupal::logger(APIC_APPCREDS_SYNC_LOG_CHANNEL)->error($message, $context);
+}
+
+function build_dyna_client_url() {
+  $dyna_client_host = APIC_DYNA_CLIENT_HOST;
+  $dyna_client_path = APIC_DYNA_CLIENT_PATH;
+
+  return $dyna_client_host . $dyna_client_path;
+}
+
+function build_bearer_token_url() {
+  $token_host = APIC_DYNA_CLIENT_HOST;
+  $token_path = APIC_BEARER_TOKEN_PATH;
+
+  return $token_host . $token_path;
+}
+
+/**
+ * Implements hook_help().
+ * @param $route_name
+ * @param RouteMatchInterface $route_match
+ * @return string
+ */
+function apic_addon_appcreds_sync_help($route_name, RouteMatchInterface $route_match) {
+  switch ($route_name) {
+    case 'help.page.apic_addon_appcreds_sync':
+
+      $output = '';
+      $output .= '<h3>'.t('About').'</h3>';
+      $output .= '<p>'.t('Sync APIC App Creds to Oauth Provider.').'</p>';
+
+      return $output;
+
+    default:
+  }
+}
+
+/**
+ * @param $app
+ * @param $path
+ */
+function appcreds_post_analytics($app, $path) {
+
+  $client = \Drupal::httpClient();
+
+  $url = APIC_TEST_ANALYTICS_URL.$path;
+
+  $x_ibm_client_id = APIC_TEST_X_IBM_CLIENT_ID;
+
+  try {
+      $resp = $client->post($url, [
+          'json' => $app,
+          'verify' => false,
+          'headers' => [
+              'Content-Type' => 'application/json',
+              'Accept' => 'application/json',
+              'X-IBM-Client-Id' => $x_ibm_client_id,
+          ]
+      ]);
+
+      $b = $resp->getStatusCode();
+  } catch (\GuzzleHttp\Exception\RequestException $e) {
+      appcreds_sync_log_error($e->getMessage());
+  }
+}
+
+/**
+ * @return array
+ */
+function access_token() {
+  //
+  // could be preconfigured initial access token
+  // or bearer access token
+  //
+
+  // return initial_access_token();
+  return bearer_access_token();
+}
+
+function initial_access_token() {
+  // get initial access token from configuration
+  // return array with key 'access_token'
+}
+
+/**
+ * @return array
+ */
+function bearer_access_token() {
+
+  $client_id = APIC_BEARER_TOKEN_CLIENT_ID;
+  $client_secret = APIC_BEARER_TOKEN_CLIENT_SECRET;
+
+  $username = APIC_BEARER_TOKEN_USER_NAME;
+  $password = APIC_BEARER_TOKEN_PASSWORD;
+
+//  $scope = IS_APIC_TEST ? APIC_TEST_BEARER_TOKEN_SCOPE : APIC_BEARER_TOKEN_SCOPE;
+
+  // post
+  $form_params = [
+    'grant_type' => 'password',
+    'client_id' => $client_id,
+    'client_secret' => $client_secret,
+    'username' => $username,
+    'password' => $password
+  ];
+
+  if (IS_APIC_TEST) {
+    $form_params['scope'] = APIC_BEARER_TOKEN_SCOPE;
+  }
+
+  try {
+    $client = \Drupal::httpClient();
+
+    $resp = $client->post(build_bearer_token_url(), [
+      'form_params' => $form_params,
+      'verify' => false,
+      'headers' => [
+        'Accept' => 'application/json'
+      ]
+    ]);
+
+    $statusCode = $resp->getStatusCode();
+    if (!is_status_code_ok($statusCode)) {
+      return [];
+    }
+
+    $b = $resp->getBody()->getContents();
+
+    // $b is json encoded string
+    $json = json_decode($b);
+
+    $token_type = $json->{'token_type'};
+    $access_token = $json->{'access_token'};
+
+    // return token array
+    $tokarr = [];
+    if (isset($token_type)) {
+      $tokarr['token_type'] = $token_type;
+    }
+
+    if (isset($access_token)) {
+      $tokarr['access_token'] = $access_token;
+    }
+
+    return $tokarr;
+
+  } catch (\GuzzleHttp\Exception\RequestException $e) {
+    appcreds_sync_log_error($e->getMessage());
+  }
+
+  return [];
+}
+
+function encode_bearer_token_header($token) {
+  return sprintf("Bearer %s", $token);
+}
+
+function is_status_code_ok($status_code) {
+  return $status_code >= 200 && $status_code < 300;
+}
+
+/**
+ * @param array $rh
+ * @param string $token
+ * @return array
+ */
+function appcreds_dyna_client_create($rh, $token) {
+
+  try {
+    $client = \Drupal::httpClient();
+
+    $hdrs = [
+      'Authorization' => encode_bearer_token_header($token),
+      'Accept' => 'application/json'
+    ];
+
+    if (IS_APIC_TEST) {
+      $hdrs['X-IBM-Client-Id'] = APIC_TEST_X_IBM_CLIENT_ID;
+    }
+
+    $resp = $client->post(build_dyna_client_url(), [
+      'json' => $rh,
+      'verify' => false,
+      'headers' => $hdrs
+    ]);
+
+    $statusCode = $resp->getStatusCode();
+    if (!is_status_code_ok($statusCode)) {
+      return [];
+    }
+
+    $b = $resp->getBody()->getContents();
+    $json = json_decode($b);
+
+    $resp_client_id = $json->{'clientId'};
+    $resp_secret = $json->{'secret'};
+    $resp_token = $json->{'registrationAccessToken'};
+
+    $resp = []; // response array
+
+    if (isset($resp_client_id)) {
+      $resp['clientId'] = $resp_client_id;
+    }
+
+    if (isset($resp_secret)) {
+      $resp['secret'] = $resp_secret;
+    }
+
+    if (isset($resp_token)) {
+      $resp['registrationAccessToken'] = $resp_token;
+    }
+
+    return $resp;
+
+  } catch (\GuzzleHttp\Exception\RequestException $e) {
+    appcreds_sync_log_error($e->getMessage());
+  }
+
+  return [];
+}
+
+/**
+ * @param string $clientid
+ * @param string $token
+ * @return bool
+ */
+function appcreds_dyna_client_delete($clientid, $token) {
+
+  $url = build_dyna_client_url();
+
+  if ($url[strlen($url)-1] == '/') {
+    $url = $url . $clientid;
+  } else {
+    $url = $url . '/' . $clientid;
+  }
+
+  try {
+    $client = \Drupal::httpClient();
+
+    $hdrs = [
+      'Authorization' => encode_bearer_token_header($token)
+    ];
+
+    if (IS_APIC_TEST) {
+      $hdrs['X-IBM-Client-Id'] = APIC_TEST_X_IBM_CLIENT_ID;
+    }
+
+    $resp = $client->delete($url, [
+      'verify' => false,
+      'headers' => $hdrs
+    ]);
+
+    $statusCode = $resp->getStatusCode();
+    if (!is_status_code_ok($statusCode)) {
+      return false;
+    }
+
+    return true;
+
+  } catch (\GuzzleHttp\Exception\RequestException $e) {
+    appcreds_sync_log_error($e->getMessage());
+  }
+
+  return false;
+}
+
+function make_registration_access_token_key($appname, $clientid) {
+  return $appname . '-' . $clientid;
+}
+
+function save_registration_access_token($key, $token) {
+  \Drupal::state()->set($key, $token);
+}
+
+function get_registration_access_token($key) {
+  $token = \Drupal::state()->get($key);
+
+  if (isset($token)) {
+    return $token;
+  }
+
+  return 'token-not-found-for-' . $key;
+}
+
+function delete_registration_access_token($key) {
+  if (isset($key)) {
+    \Drupal::state()->delete($key);
+  }
+}
+
+/**
+ * Triggered when an application is created
+ *
+ * @param NodeInterface $node
+ *   The Drupal node representing this application
+ * @param array $app
+ *   The array of data returned by API Manager
+ */
+function apic_addon_appcreds_sync_apic_app_create(NodeInterface $node, $app) {
+
+  if (!isset($app) || empty($app)) return;
+
+  $appname = $app['name'];
+  $redirectendpoints = $app['redirect_endpoints'];
+  $clientid = $app['client_id'];
+  $clientsecret = $app['client_secret'];
+
+  // client registration request
+  $rh = [];
+
+  $rh['name'] = make_registration_access_token_key($appname, $clientid);
+  $rh['clientId'] = isset($clientid) ? $clientid : '';
+  $rh['secret'] = isset($clientsecret) ? $clientsecret : '';
+  $rh['redirectUris'] = isset($redirectendpoints) ? $redirectendpoints : [];
+
+  // get access token (bearer or initial)
+  $tokenarr = access_token();
+  if (empty($tokenarr)) return;
+
+  $access_token = $tokenarr['access_token'];
+  if (!isset($access_token)) {
+    appcreds_sync_log_error('@f: initial access token required for dynamic oauth client registration, app-name=@appname, client-id=@cid',
+      ['@f' => __FUNCTION__, '@appname'=>$appname, '@cid'=>$clientid]);
+    return;
+  }
+
+  // call client registration service
+  $resp = appcreds_dyna_client_create($rh, $access_token);
+  if (empty($resp)) return;
+
+  $regtoken = $resp['registrationAccessToken'];
+  if (!isset($regtoken)) {
+    appcreds_sync_log_error('@f: registration access token required for dynamic oauth client registration, app-name=@appname, client-id=@cid',
+      ['@f' => __FUNCTION__, '@appname'=>$appname, '@cid'=>$clientid]);
+    return;
+  }
+
+  // save registration token
+  $tokenkey = make_registration_access_token_key($appname, $clientid);
+  save_registration_access_token($tokenkey, $regtoken);
+
+  // debug: post input to analytics
+  if (IS_APIC_TEST) {
+    $keyval = [];
+    $keyval['reg-token-key'] = $tokenkey;
+    $keyval['reg-token'] = $regtoken;
+
+    $app['clientreg'] = $keyval;
+
+    appcreds_post_analytics($app, '/appnew');
+  }
+}
+
+/**
+ * Triggered when an application is updated
+ *
+ * @param NodeInterface $node
+ *   The Drupal node representing this application
+ * @param array $app
+ *   The array of data returned by API Manager
+ */
+function apic_addon_appcreds_sync_apic_app_update(NodeInterface $node, $app) {
+
+  if (IS_APIC_TEST) appcreds_post_analytics($app, '/appupdate');
+}
+
+/**
+ * Triggered when an application is deleted
+ *
+ * @param NodeInterface $node
+ *   The Drupal node representing this application
+ * @param array $app
+ *   The array of data returned by API Manager (could be empty)
+ * @param string $appId
+ *   The ID of the application that has been deleted
+ */
+function apic_addon_appcreds_sync_apic_app_delete(NodeInterface $node, $app, $appId) {
+
+  if (!isset($app) || empty($app)) {
+    return;
+  }
+
+  if (!isset($appId)) {
+    return;
+  }
+
+  //
+  // $app contains app_credentials_urls array, last url component is creadential id
+  //
+  $appcredurls = $app['app_credential_urls'];
+
+  $zx = [];
+
+  if (isset($appcredurls) && !empty($appcredurls)) {
+
+    foreach ($appcredurls as $credurl) {
+
+      $pos = strrpos($credurl, 'credentials/');
+      if ($pos === false) {
+        continue;
+      }
+
+      $credid = substr($credurl, $pos);
+      if ($credid === false) {
+        continue;
+      }
+
+      if (strlen($credid) > strlen('credentials/')) {
+
+        $cid = substr($credid, strlen('credentials/'));
+        if ($cid !== false) {
+
+          // query for credential by id, get client_id
+          if (IS_APIC_TEST) array_push($zx, $cid);
+
+          try {
+            $crednode = Drupal\apic_app\Entity\Credentials::load($cid);
+
+            if (IS_APIC_TEST) array_push($zx, "cid loaded...");
+
+            if ($crednode instanceof \Drupal\Core\Entity\EntityInterface) {
+              if (IS_APIC_TEST) array_push($zx, 'crednode is entity-interface');
+
+            }
+
+            if ($crednode instanceof \Drupal\apic_app\CredentialsInterface) {
+
+              if (IS_APIC_TEST) array_push($zx, 'crednode is credentials-interface');
+
+              $credsarr = $crednode->toArray();
+              $clientid = $credsarr['client_id'];
+
+              if (IS_APIC_TEST) array_push($zx, $credsarr);
+              if (IS_APIC_TEST) array_push($zx, $clientid);
+
+              // get saved access token
+              $appname = $app['name'];
+              $tokenkey = make_registration_access_token_key($appname, $clientid);
+
+              $token = get_registration_access_token($tokenkey);
+
+              if (IS_APIC_TEST) {
+                $tk = [];
+                $tk['tokenkey'] = $tokenkey;
+                $tk['token'] = $token;
+                array_push($zx, $tk);
+              }
+
+              // call client delete, pass reg access token
+              $isok = appcreds_dyna_client_delete($clientid, $token);
+
+              // delete access token
+              delete_registration_access_token($tokenkey);
+            }
+
+          }  catch (\Drupal\Component\Plugin\Exception\InvalidPluginDefinitionException $e) {
+            appcreds_sync_log_error($e->getMessage());
+
+            if (IS_APIC_TEST) array_push($zx, $e);
+
+          } catch (\Drupal\Component\Plugin\Exception\PluginNotFoundException $e) {
+            appcreds_sync_log_error($e->getMessage());
+
+            if (IS_APIC_TEST) array_push($zx, $e);
+          }
+
+        }
+      }
+
+    }
+  }
+
+  if (IS_APIC_TEST) {
+    if (!empty($zx)) $app['zx'] = $zx;
+    appcreds_post_analytics($app, '/appdelete');
+  }
+
+}
+
+/**
+ * Triggered when a new set of credentials is created for an application
+ *
+ * @param NodeInterface $node
+ *   The Drupal node representing this application
+ * @param array $data
+ *   The array of data returned by API Manager (could be empty)
+ * @param string $credId
+ *   The ID of the credentials
+ */
+function apic_addon_appcreds_sync_apic_app_creds_create(NodeInterface $node, $data, $credId) {
+
+  if (IS_APIC_TEST) appcreds_post_analytics($data, '/credsnew');
+}
+
+/**
+ * Triggered when a set of credentials is updated for an application
+ *
+ * @param NodeInterface $node
+ *   The Drupal node representing this application
+ * @param array $data
+ *   The array of data returned by API Manager (could be empty)
+ * @param string $credId
+ *   The ID of the credentials
+ */
+function apic_addon_appcreds_sync_apic_app_creds_update(NodeInterface $node, $data, $credId) {
+
+  if (IS_APIC_TEST) appcreds_post_analytics($data, '/credsupdate');
+}
+
+/**
+ * Triggered when a set of credentials is deleted for an application
+ *
+ * @param NodeInterface $node
+ *   The Drupal node representing this application
+ * @param array $data
+ *   The array of data returned by API Manager (could be empty)
+ * @param string $credId
+ *   The ID of the credentials
+ */
+function apic_addon_appcreds_sync_apic_app_creds_delete(NodeInterface $node, $data, $credId) {
+
+  if (IS_APIC_TEST) appcreds_post_analytics($data, '/credsdelete');
+}
+
+/**
+ * Triggered when a credential client ID is reset
+ *
+ * @param NodeInterface $node
+ *   The Drupal node representing this application
+ * @param array $data
+ *   The array of data returned by API Manager (could be empty)
+ * @param string $appId
+ *   The application ID
+ * @param string $credId
+ *   The credential ID
+ */
+function apic_addon_appcreds_sync_apic_app_clientid_reset(NodeInterface $node, $data, $appId, $credId) {
+
+  if (IS_APIC_TEST) appcreds_post_analytics($data, '/clientidreset');
+}
+
+/**
+ * Triggered when a credential client secret is reset
+ *
+ * @param NodeInterface $node
+ *   The Drupal node representing this application
+ * @param array $data
+ *   The array of data returned by API Manager (could be empty)
+ * @param string $appId
+ *   The application ID
+ * @param string $credId
+ *   The credential ID
+ */
+function apic_addon_appcreds_sync_apic_app_clientsecret_reset(NodeInterface $node, $data, $appId, $credId) {
+
+  if (IS_APIC_TEST) appcreds_post_analytics($data, '/clientsecretreset');
+}

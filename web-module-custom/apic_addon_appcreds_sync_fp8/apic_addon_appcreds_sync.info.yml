@@ -1,0 +1,7 @@
+name: APIC App Creds Sync
+description: Sync APIC App Creds to Oauth Provider
+type: module
+core: 8.x
+package: Custom
+version: 8.x-1.0.0
+project: apic_addon
