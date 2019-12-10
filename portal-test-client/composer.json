@@ -1,0 +1,7 @@
+{
+  "name": "simon/drclient",
+  "require": {
+    "guzzlehttp/guzzle": "^6.3",
+    "ext-json": "*"
+  }
+}
