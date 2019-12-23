@@ -1,0 +1,43 @@
+apic_addon_appcreds_sync.settings:
+  type: config_object
+  label: 'app creds sync settings'
+  mapping:
+    client_host:
+      type: string
+      label: 'auth client registration host'
+    client_path:
+      type: string
+      label: 'auth client registration path'
+    initial_access_token:
+      type: string
+      label: 'initial access token for the dynamic client api'
+    enable_test_analytics:
+      type: boolean
+      label: 'enable test mode to post apim data to analytics'
+    test_analytics_url:
+      type: string
+      label: 'api endpoint to post apim data to analytics'
+    test_analytics_client_id:
+      type: string
+      label: 'client id subscribed to the test analytics api'
+    enable_bearer_access_token:
+      type: boolean
+      label: 'enable bearer access token for dynamic client api'
+    bearer_token_path:
+      type: string
+      label: 'bearer access token path'
+    bearer_token_client_id:
+      type: string
+      label: 'bearer token client id'
+    bearer_token_client_secret:
+      type: string
+      label: 'bearer token client secret'
+    bearer_token_user:
+      type: string
+      label: 'bearer token user for initial password grant'
+    bearer_token_password:
+      type: string
+      label: 'bearer token password for initial password grant'
+    bearer_token_scope:
+      type: string
+      label: 'bearer token scope for initial password grant'
