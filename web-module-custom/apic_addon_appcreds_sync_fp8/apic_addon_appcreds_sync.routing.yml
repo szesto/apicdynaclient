@@ -1,0 +1,7 @@
+apic_addon_appcreds_sync.appcreds_sync_settings:
+  path: '/admin/config/appcreds-sync-settings'
+  defaults:
+    _form: '\Drupal\apic_addon_appcreds_sync\Form\AppcredsSyncSettingsForm'
+    _title: 'Appcreds Sync Settings Configuration'
+  requirements:
+    _permission: 'administer site configuration'
