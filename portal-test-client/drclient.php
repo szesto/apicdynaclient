@@ -5,29 +5,11 @@ require 'vendor/autoload.php';
 //
 // client env, will be loaded from configuration
 //
+require 'client-env.php';
 
 define('IS_APIC_TEST', False);
 
-define('APIC_DYNA_CLIENT_HOST', '');
-define('APIC_DYNA_CLIENT_PATH', '');
-
-define('APIC_BEARER_TOKEN_PATH','');
-define('APIC_BEARER_TOKEN_CLIENT_ID', '');
-define('APIC_BEARER_TOKEN_CLIENT_SECRET', '');
-define('APIC_BEARER_TOKEN_USER_NAME', '');
-define('APIC_BEARER_TOKEN_PASSWORD', '');
-define('APIC_BEARER_TOKEN_SCOPE', '');
-
-define('APIC_TEST_X_IBM_CLIENT_ID', '');
-
-define('APIC_TEST_ANALYTICS_URL', '');
-
-//
-// end-of client-env
-//
-
 function appcreds_sync_log_error($message, $context = array()) {
-//    \Drupal::logger(APIC_APPCREDS_SYNC_LOG_CHANNEL)->error($message, $context);
     print_r(sprintf("%s\n", $message));
 }
 
@@ -82,9 +64,21 @@ function access_token() {
     // could be preconfigured initial access token
     // or bearer access token
     //
+    if (APIC_IS_INITIAL_ACCESS_TOKEN) {
+        return initial_access_token();
+    }
 
-    // return initial_access_token();
     return bearer_access_token();
+}
+
+function initial_access_token() {
+    $tok = APIC_INITIAL_ACCESS_TOKEN;
+
+    $tokarr = [];
+    $tokarr['token_type'] = 'inital_access_token';
+    $tokarr['access_token'] = $tok;
+
+    return $tokarr;
 }
 
 function is_status_code_ok($status_code) {
@@ -116,13 +110,15 @@ function bearer_access_token() {
     if (IS_APIC_TEST) {
         $form_params['scope'] = APIC_BEARER_TOKEN_SCOPE;
     }
+    $form_params['scope'] = 'openid';
 
-    try {
+    // try {
         $client = new \GuzzleHttp\Client();
 
         $resp = $client->post(build_bearer_token_url(), [
             'form_params' => $form_params,
             'verify' => false,
+            'debug' => true,
             'headers' => [
                 'Accept' => 'application/json'
             ]
@@ -153,9 +149,9 @@ function bearer_access_token() {
 
         return $tokarr;
 
-    } catch (\GuzzleHttp\Exception\RequestException $e) {
-        appcreds_sync_log_error($e->getMessage());
-    }
+    // } catch (\GuzzleHttp\Exception\RequestException $e) {
+    //     appcreds_sync_log_error($e->getMessage());
+    // }
 
     return [];
 }
@@ -171,7 +167,7 @@ function encode_bearer_token_header($token) {
  */
 function appcreds_dyna_client_create($rh, $token) {
 
-    try {
+//    try {
         $client = new GuzzleHttp\Client();
 
         $hdrs = [
@@ -182,10 +178,12 @@ function appcreds_dyna_client_create($rh, $token) {
         if (IS_APIC_TEST) {
             $hdrs['X-IBM-Client-Id'] = APIC_TEST_X_IBM_CLIENT_ID;
         }
+        $hrds['scope'] = 'openid';
 
         $resp = $client->post(build_dyna_client_url(), [
             'json' => $rh,
             'verify' => false,
+            'debug' => true,
             'headers' => $hdrs
         ]);
 
@@ -217,9 +215,9 @@ function appcreds_dyna_client_create($rh, $token) {
 
         return $resp;
 
-    } catch (\GuzzleHttp\Exception\RequestException $e) {
-        appcreds_sync_log_error($e->getMessage());
-    }
+//    } catch (\GuzzleHttp\Exception\RequestException $e) {
+//        appcreds_sync_log_error($e->getMessage());
+//    }
 
     return [];
 }
@@ -280,6 +278,7 @@ $tokarr = access_token();
 print_r($tokarr);
 
 $access_token = $tokarr['access_token'];
+
 
 //
 // create client
