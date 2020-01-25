@@ -447,6 +447,36 @@ function delete_registration_access_token($key) {
     }
 }
 
+function make_credentials_key($appname, $credentialsId) {
+    return 'apic-appcreds-sync.' . $appname . '-' . 'creds' . '-'. $credentialsId;
+}
+
+function save_credentials_clientid($key, $clientId) {
+    if (isset($key) && isset($clientId)) {
+        \Drupal::state()->set($key, $clientId);
+    }
+}
+
+function get_credentials_clientid($key) {
+    if (isset($key)) {
+        $clientid = \Drupal::state()->get($key);
+
+        if (isset($clientid)) {
+            return $clientid;
+        }
+
+        return 'clientid-not-found-for-' . $key;
+    }
+
+    return 'clientid-not-found-for-' . 'unknown-key';
+}
+
+function delete_credentials_clientid($key) {
+    if (isset($key)) {
+        \Drupal::state()->delete($key);
+    }
+}
+
 /**
  * Triggered when an application is created
  *
@@ -459,52 +489,36 @@ function apic_addon_appcreds_sync_apic_app_create(NodeInterface $node, $app) {
 
     if (!isset($app) || empty($app)) return;
 
+    $appcredurls = $app['app_credential_urls'];
+    $credids = parse_credential_ids($appcredurls);
+
+    $cid = "";
+    if (isset($credids) && !empty($credids)) {
+        $cid = $credids[0];
+    }
+
     $appname = $app['name'];
     $redirectendpoints = $app['redirect_endpoints'];
     $clientid = $app['client_id'];
     $clientsecret = $app['client_secret'];
 
-    // client registration request
-    $rh = [];
+    $cc = appcreds_client_create($appname, $clientid, $clientsecret, $redirectendpoints, $cid);
 
-    $rh['name'] = make_registration_access_token_key($appname, $clientid);
-    $rh['clientId'] = isset($clientid) ? $clientid : '';
-    $rh['secret'] = isset($clientsecret) ? $clientsecret : '';
-    $rh['redirectUris'] = isset($redirectendpoints) ? $redirectendpoints : [];
-
-    // get access token (bearer or initial)
-    $tokenarr = access_token();
-    if (empty($tokenarr)) return;
-
-    $access_token = $tokenarr['access_token'];
-    if (!isset($access_token)) {
-        appcreds_sync_log_error('@f: initial access token required for dynamic oauth client registration, app-name=@appname, client-id=@cid',
-            ['@f' => __FUNCTION__, '@appname' => $appname, '@cid' => $clientid]);
-        return;
-    }
-
-    // call client registration service
-    $resp = appcreds_dyna_client_create($rh, $access_token);
-    if (empty($resp)) return;
-
-    $regtoken = $resp['registrationAccessToken'];
-    if (!isset($regtoken)) {
-        appcreds_sync_log_error('@f: registration access token required for dynamic oauth client registration, app-name=@appname, client-id=@cid',
-            ['@f' => __FUNCTION__, '@appname' => $appname, '@cid' => $clientid]);
-        return;
-    }
-
-    // save registration token
-    $tokenkey = make_registration_access_token_key($appname, $clientid);
-    save_registration_access_token($tokenkey, $regtoken);
+    $ok = $cc[0];
+    $tokenkey = $cc[1];
+    $regtoken = $cc[2];
 
     // debug: post input to analytics
-    if (apic_addon_appcreds_sync_test()) {
+    if ($ok && apic_addon_appcreds_sync_test()) {
         $keyval = [];
         $keyval['reg-token-key'] = $tokenkey;
         $keyval['reg-token'] = $regtoken;
 
         $app['clientreg'] = $keyval;
+
+        $credkey = make_credentials_key($appname, $cid);
+        $app['credkey'] = $credkey;
+        $app['clientid-by-credid'] = get_credentials_clientid($credkey);
 
         appcreds_post_analytics($app, '/appnew');
     }
@@ -519,9 +533,17 @@ function apic_addon_appcreds_sync_apic_app_create(NodeInterface $node, $app) {
  *   The array of data returned by API Manager
  */
 function apic_addon_appcreds_sync_apic_app_update(NodeInterface $node, $app) {
-//    if (apic_addon_appcreds_sync_test()) {
-//        appcreds_post_analytics($app, '/appupdate');
-//    }
+
+    // get credslist for an app...
+    // for each cred in credslist update client-id with a new list of redirect-uri's
+
+    // if all data is required for update
+    // for each cred in credlist get client data
+    // update client data with new redirect-uris
+
+    if (apic_addon_appcreds_sync_test()) {
+        appcreds_post_analytics($app, '/appupdate');
+    }
 }
 
 /**
@@ -546,135 +568,90 @@ function apic_addon_appcreds_sync_apic_app_delete(NodeInterface $node, $app, $ap
         return;
     }
 
-    //
-    // $app contains app_credentials_urls array, last url component is creadential id
-    //
     $appcredurls = $app['app_credential_urls'];
+    $credids = parse_credential_ids($appcredurls);
 
-    $zx = [];
+    $debugdata = [];
 
-    if (isset($appcredurls) && !empty($appcredurls)) {
+    if (isset($credids) && !empty($credids)) {
 
-        foreach ($appcredurls as $credurl) {
-
-            $pos = strrpos($credurl, 'credentials/');
-            if ($pos === false) {
-                continue;
+        foreach ($credids as $cid) {
+            // query for credential by id, get client_id
+            if (apic_addon_appcreds_sync_test()) {
+                array_push($debugdata, $cid);
             }
 
-            $credid = substr($credurl, $pos);
-            if ($credid === false) {
-                continue;
-            }
+            try {
+                $crednode = Drupal\apic_app\Entity\Credentials::load($cid);
+                if (!isset($crednode)) {
+                    appcreds_sync_log_error(sprintf('%s: failed to load credential with id = %s', __FUNCTION__, $cid));
+                    continue;
+                }
 
-            if (strlen($credid) > strlen('credentials/')) {
+                if (apic_addon_appcreds_sync_test()) {
+                    array_push($debugdata, "cid loaded...");
+                }
 
-                $cid = substr($credid, strlen('credentials/'));
-                if ($cid !== false) {
-
-                    // query for credential by id, get client_id
+                if ($crednode instanceof \Drupal\Core\Entity\EntityInterface) {
                     if (apic_addon_appcreds_sync_test()) {
-                        array_push($zx, $cid);
+                        array_push($debugdata, 'crednode is entity-interface');
+                    }
+                }
+
+                if ($crednode instanceof \Drupal\apic_app\CredentialsInterface) {
+
+                    if (apic_addon_appcreds_sync_test()) {
+                        array_push($debugdata, 'crednode is credentials-interface');
                     }
 
-                    try {
-                        $crednode = Drupal\apic_app\Entity\Credentials::load($cid);
-                        if (!isset($crednode)) {
-                            appcreds_sync_log_error(sprintf('%s: failed to load credential with id = %s', __FUNCTION__, $cid));
-                            continue;
-                        }
-
-                        if (apic_addon_appcreds_sync_test()) {
-                            array_push($zx, "cid loaded...");
-                        }
-
-                        if ($crednode instanceof \Drupal\Core\Entity\EntityInterface) {
-                            if (apic_addon_appcreds_sync_test()) {
-                                array_push($zx, 'crednode is entity-interface');
-                            }
-                        }
-
-                        if ($crednode instanceof \Drupal\apic_app\CredentialsInterface) {
-
-                            if (apic_addon_appcreds_sync_test()) {
-                                array_push($zx, 'crednode is credentials-interface');
-                            }
-
-                            $credsarr = $crednode->toArray();
-                            if (!isset($credsarr)) {
-                                appcreds_sync_log_error(sprintf('%s: failed to convert crednode to array, creds-id = %s', __FUNCTION__, $cid));
-                                continue;
-                            }
-
-                            if (apic_addon_appcreds_sync_test()) {
-                                array_push($zx, $credsarr);
-                            }
-
-                            // get saved access token
-                            $clientid = $credsarr['client_id'];
-                            $appname = $app['name'];
-
-                            if (!isset($clientid)) {
-                                appcreds_sync_log_error(sprintf('%s: client-id is not set for credential with id = %s', __FUNCTION__, $cid));
-                                continue;
-                            }
-
-                            if (!isset($appname)) {
-                                appcreds_sync_log_error(sprintf('%s: name is not set for application with id = %s', __FUNCTION__, $appId));
-                                continue;
-                            }
-
-                            $tokenkey = make_registration_access_token_key($appname, $clientid);
-
-                            $token = get_registration_access_token($tokenkey);
-                            if (!isset($token)) {
-                                appcreds_sync_log_error(sprintf('%s: failed to get registration token, tokenkey = %s', __FUNCTION__, $tokenkey));
-                                continue;
-                            }
-
-                            if (apic_addon_appcreds_sync_test()) {
-                                $tk = [];
-                                $tk['tokenkey'] = $tokenkey;
-                                $tk['token'] = $token;
-                                array_push($zx, $tk);
-                            }
-
-                            // call client delete, pass reg access token
-                            $isok = appcreds_dyna_client_delete($clientid, $token);
-                            if (!$isok) {
-                                appcreds_sync_log_error(sprintf("%s: invocation to delete dynamic client failed... client-id = %s, registration-token = %s", __FUNCTION__, $clientid, $token));
-                            }
-
-                            // delete access token
-                            delete_registration_access_token($tokenkey);
-                        }
-
-                    } catch (\Drupal\Component\Plugin\Exception\InvalidPluginDefinitionException $e) {
-                        appcreds_sync_log_error($e->getMessage());
-
-                        if (apic_addon_appcreds_sync_test()) {
-                            array_push($zx, $e);
-                        }
-
-                    } catch (\Drupal\Component\Plugin\Exception\PluginNotFoundException $e) {
-                        appcreds_sync_log_error($e->getMessage());
-
-                        if (apic_addon_appcreds_sync_test()) {
-                            array_push($zx, $e);
-                        }
+                    $credsarr = $crednode->toArray();
+                    if (!isset($credsarr)) {
+                        appcreds_sync_log_error(sprintf('%s: failed to convert crednode to array, creds-id = %s', __FUNCTION__, $cid));
+                        continue;
                     }
 
+                    if (apic_addon_appcreds_sync_test()) {
+                        array_push($debugdata, $credsarr);
+                    }
+
+                    // get saved access token
+                    $clientid = $credsarr['client_id'];
+                    $appname = $app['name'];
+
+                    if (!isset($clientid)) {
+                        appcreds_sync_log_error(sprintf('%s: client-id is not set for credential with id = %s', __FUNCTION__, $cid));
+                        continue;
+                    }
+
+                    if (!isset($appname)) {
+                        appcreds_sync_log_error(sprintf('%s: name is not set for application with id = %s', __FUNCTION__, $appId));
+                        continue;
+                    }
+
+                    $cd = appcreds_client_delete($appname, $clientid, $cid, $debugdata);
+                }
+
+            } catch (\Drupal\Component\Plugin\Exception\InvalidPluginDefinitionException $e) {
+                appcreds_sync_log_error($e->getMessage());
+
+                if (apic_addon_appcreds_sync_test()) {
+                    array_push($debugdata, $e);
+                }
+
+            } catch (\Drupal\Component\Plugin\Exception\PluginNotFoundException $e) {
+                appcreds_sync_log_error($e->getMessage());
+
+                if (apic_addon_appcreds_sync_test()) {
+                    array_push($debugdata, $e);
                 }
             }
-
         }
     }
 
     if (apic_addon_appcreds_sync_test()) {
-        if (!empty($zx)) $app['zx'] = $zx;
+        if (!empty($debugdata)) $app['debugdata'] = $debugdata;
         appcreds_post_analytics($app, '/appdelete');
     }
-
 }
 
 /**
@@ -688,6 +665,47 @@ function apic_addon_appcreds_sync_apic_app_delete(NodeInterface $node, $app, $ap
  *   The ID of the credentials
  */
 function apic_addon_appcreds_sync_apic_app_creds_create(NodeInterface $node, $data, $credId) {
+    $debugdata = [];
+
+    if (!isset($node)) {
+        // complain
+        return;
+    }
+
+    if (!isset($data)) {
+        // complain
+        return;
+    }
+
+    if (!isset($credId)) {
+        // complain
+        return;
+    }
+
+    // $data contains new credential: client_id, client_secret, etc
+    // $appId contains application-id
+    // $credId contains credential-id that is the same as in the $data array
+
+    $client_id = $data['client_id'];
+    $client_secret = $data['client_secret'];
+
+    // load application by id to get app-name, redirect-uri's
+    $app = appcreds_load_application($node);
+    $appname = appcreds_get_application_name($app);
+    $redirecturis = appcreds_get_redirect_endpoints($app);
+
+    if (apic_addon_appcreds_sync_test()) {
+        $debugdata['var-app'] = $app;
+        $debugdata['lapp-application-name'] = $appname;
+        $debugdata['lapp-redirect-uris'] = $redirecturis;
+        $debugdata['arg-data'] = $data;
+        $debugdata['arg-credId'] = $credId;
+    }
+
+    // create new client cred
+    $crt = appcreds_client_create($appname, $client_id, $client_secret, $redirecturis, $credId);
+    $crtok = $crt[0];
+
     if (apic_addon_appcreds_sync_test()) {
         appcreds_post_analytics($data, '/credsnew');
     }
@@ -720,8 +738,23 @@ function apic_addon_appcreds_sync_apic_app_creds_update(NodeInterface $node, $da
  *   The ID of the credentials
  */
 function apic_addon_appcreds_sync_apic_app_creds_delete(NodeInterface $node, $data, $credId) {
+
+    $debugdata = [];
+
+    $client_id = $data["client_id"];
+
+    $app = appcreds_load_application($node);
+    $appname = appcreds_get_application_name($app);
+
+    $del = appcreds_client_delete($appname, $client_id, $credId, $debugdata);
+    $delok = $del[0];
+
     if (apic_addon_appcreds_sync_test()) {
-        appcreds_post_analytics($data, '/credsdelete');
+        $debugdata['arg-data'] = $data;
+        $debugdata['lapp-name'] = $appname;
+        $debugdata['rc-delok'] = $delok;
+
+        appcreds_post_analytics($debugdata, '/credsdelete');
     }
 }
 
@@ -738,8 +771,47 @@ function apic_addon_appcreds_sync_apic_app_creds_delete(NodeInterface $node, $da
  *   The credential ID
  */
 function apic_addon_appcreds_sync_apic_app_clientid_reset(NodeInterface $node, $data, $appId, $credId) {
+
+    $debugdata = [];
+
+    // load application by id to get app-name, redirect-uri's
+    $app = appcreds_load_application($node);
+    $appname = appcreds_get_application_name($app);
+    $redirecturis = appcreds_get_redirect_endpoints($app);
+
     if (apic_addon_appcreds_sync_test()) {
-        appcreds_post_analytics($data, '/clientidreset');
+        $debugdata['var-app'] = $app;
+        $debugdata['lapp-application-name'] = $appname;
+        $debugdata['lapp-redirect-uris'] = $redirecturis;
+        $debugdata['arg-data'] = $data;
+        $debugdata['arg-credId'] = $credId;
+    }
+
+    // delete existing client cred
+    $credkey = make_credentials_key($appname, $credId);
+    $old_client_id = get_credentials_clientid($credkey);
+
+    if (apic_addon_appcreds_sync_test()) {
+        $debugdata['credkey'] = $credkey;
+        $debugdata['oldclientid'] = $old_client_id;
+    }
+
+    $del = appcreds_client_delete($appname, $old_client_id, $credId, $debugdata);
+    $delok = $del[0];
+
+    // create new client cred
+    // we do not check if previous delete call failed
+    // it is possible that updated version of the module is installed after
+    // existing clients are already synced up to rh without tracking client ids
+
+    $new_client_id = $data['client_id'];
+    $new_client_secret = $data['client_secret'];
+
+    $crt = appcreds_client_create($appname, $new_client_id, $new_client_secret, $redirecturis, $credId);
+    $crtok = $crt[0];
+
+    if (apic_addon_appcreds_sync_test()) {
+        appcreds_post_analytics($debugdata, '/clientidreset');
     }
 }
 
@@ -756,7 +828,229 @@ function apic_addon_appcreds_sync_apic_app_clientid_reset(NodeInterface $node, $
  *   The credential ID
  */
 function apic_addon_appcreds_sync_apic_app_clientsecret_reset(NodeInterface $node, $data, $appId, $credId) {
-    if (apic_addon_appcreds_sync_test()) {
-        appcreds_post_analytics($data, '/clientsecretreset');
+    $debugdata = [];
+
+    if (isset($data) && apic_addon_appcreds_sync_test()) {
+        $debugdata['arg-data'] = $data;
     }
+
+    if (isset($appId) && apic_addon_appcreds_sync_test()) {
+        $debugdata['arg-appid'] = $appId;
+    }
+
+    if (isset($credId) && apic_addon_appcreds_sync_test()) {
+        $debugdata['arg-credid'] = $credId;
+    }
+
+    // $data contains new credential: client_id, client_secret, etc
+    // $appId contains application-id
+    // $credId contains credential-id
+
+    $client_id = $data['client_id'];
+    $client_secret = $data['client_secret'];
+
+    // load application by id to get app-name, redirect-uri's
+    $app = appcreds_load_application($node);
+    $appname = appcreds_get_application_name($app);
+    $redirecturis = appcreds_get_redirect_endpoints($app);
+
+    if (apic_addon_appcreds_sync_test()) {
+        $debugdata['var-app'] = $app;
+        $debugdata['lapp-application-name'] = $appname;
+        $debugdata['lapp-redirect-uris'] = $redirecturis;
+    }
+
+    $del = appcreds_client_delete($appname, $client_id, $credId, $debugdata);
+    $delok = $del[0];
+
+    if ($delok) {
+        // create new client cred
+        $crt = appcreds_client_create($appname, $client_id, $client_secret, $redirecturis, $credId);
+        $crtok = $crt[0];
+    }
+
+    if (apic_addon_appcreds_sync_test()) {
+        appcreds_post_analytics($debugdata, '/clientsecretreset');
+    }
+}
+
+/**
+ * @param NodeInterface $node
+ * @return array
+ */
+function appcreds_load_application(NodeInterface $node): array {
+    if (isset($node)) {
+        try {
+            return $node->toArray();
+        } catch (\Drupal\Core\Entity\EntityStorageException $e) {
+            appcreds_sync_log_error($e->getMessage());
+        }
+    }
+    return [];
+}
+
+function appcreds_get_application_name($app): string {
+    $application_name_arr = $app['application_name'];
+
+    if (isset($application_name_arr) && !empty($application_name_arr)) {
+        $application_name = array_shift($application_name_arr);
+        return $application_name["value"];
+    }
+
+    return "";
+}
+
+function appcreds_get_redirect_endpoints($app): array {
+    $endpoints = [];
+    $application_redirect_endpoints_arr = $app["application_redirect_endpoints"];
+
+    if (isset($application_redirect_endpoints_arr) && !empty($application_redirect_endpoints_arr)) {
+        foreach ($application_redirect_endpoints_arr as $endp) {
+            array_push($endpoints, $endp["value"]);
+        }
+    }
+
+    return $endpoints;
+}
+
+function appcreds_get_credential_ids($app): array {
+    $credids = [];
+    $application_credentials_refs = $app["application_credentials_refs"];
+
+    if (isset($application_credentials_refs) && !empty($application_credentials_refs)) {
+        foreach($application_credentials_refs as $credref) {
+            array_push($credids, $credref["target_id"]);
+        }
+    }
+
+    return $credids;
+}
+
+function parse_credential_ids($app_credential_urls): array {
+    $credids = [];
+
+    if (isset($app_credential_urls) && !empty($app_credential_urls)) {
+
+        foreach ($app_credential_urls as $credurl) {
+
+            $pos = strrpos($credurl, 'credentials/');
+            if ($pos === false) {
+                continue;
+            }
+
+            $credid = substr($credurl, $pos);
+            if ($credid === false) {
+                continue;
+            }
+
+            if (strlen($credid) > strlen('credentials/')) {
+
+                // last url component is creadential id
+                $cid = substr($credid, strlen('credentials/'));
+                if ($cid !== false) {
+                    array_push($credids, $cid);
+                }
+            }
+        }
+    }
+
+    return $credids;
+}
+
+/**
+ * @param string $appname
+ * @param string $clientid
+ * @param string $clientsecret
+ * @param array $redirectendpoints
+ * @param string $credid
+ * @return array
+ * (bool ok, $tokenkey, $regtoken)
+ */
+function appcreds_client_create($appname, $clientid, $clientsecret, $redirectendpoints, $credid): array {
+
+    // client registration request
+    $rh = [];
+
+    $rh['name'] = make_registration_access_token_key($appname, $clientid);
+    $rh['clientId'] = isset($clientid) ? $clientid : '';
+    $rh['secret'] = isset($clientsecret) ? $clientsecret : '';
+    $rh['redirectUris'] = isset($redirectendpoints) ? $redirectendpoints : [];
+
+    // get access token (bearer or initial)
+    $tokenarr = access_token();
+    if (empty($tokenarr)) return array(false, "", "");
+
+    $access_token = $tokenarr['access_token'];
+    if (!isset($access_token)) {
+        appcreds_sync_log_error('@f: initial access token required for dynamic oauth client registration, app-name=@appname, client-id=@cid',
+            ['@f' => __FUNCTION__, '@appname' => $appname, '@cid' => $clientid]);
+        return array(false, "", "");
+    }
+
+    // call client registration service
+    $resp = appcreds_dyna_client_create($rh, $access_token);
+    if (empty($resp)) return array(false, "", "");
+
+    $regtoken = $resp['registrationAccessToken'];
+    if (!isset($regtoken)) {
+        appcreds_sync_log_error('@f: registration access token required for dynamic oauth client registration, app-name=@appname, client-id=@cid',
+            ['@f' => __FUNCTION__, '@appname' => $appname, '@cid' => $clientid]);
+        return array(false, "", "");
+    }
+
+    // save registration token
+    $tokenkey = make_registration_access_token_key($appname, $clientid);
+    save_registration_access_token($tokenkey, $regtoken);
+
+    // save client-id
+    $credkey = make_credentials_key($appname, $credid);
+    save_credentials_clientid($credkey, $clientid);
+
+    return array(true, $tokenkey, $regtoken);
+}
+
+/**
+ * @param string $appname
+ * @param string  $clientid
+ * @param string $credid
+ * @param array &$debugdata
+ * @return array
+ * (bool ok, string $tokenkey, string $token)
+ */
+function appcreds_client_delete($appname, $clientid, $credid, &$debugdata): array {
+    $tokenkey = make_registration_access_token_key($appname, $clientid);
+
+    $token = get_registration_access_token($tokenkey);
+    if (!isset($token)) {
+        appcreds_sync_log_error(sprintf('%s: failed to get registration token, tokenkey = %s', __FUNCTION__, $tokenkey));
+        return array(false, "", "");
+    }
+
+    if (apic_addon_appcreds_sync_test()) {
+        $tk = [];
+        $tk['tokenkey'] = $tokenkey;
+        $tk['token'] = $token;
+        array_push($debugdata, $tk);
+    }
+
+    // call client delete, pass reg access token
+    $isok = appcreds_dyna_client_delete($clientid, $token);
+    if (!$isok) {
+        appcreds_sync_log_error(sprintf("%s: invocation to delete dynamic client failed... client-id = %s, registration-token = %s", __FUNCTION__, $clientid, $token));
+    }
+
+    // delete access token
+    delete_registration_access_token($tokenkey);
+
+    // delete client-id
+    $credkey = make_credentials_key($appname, $credid);
+    delete_credentials_clientid($credkey);
+
+    if (apic_addon_appcreds_sync_test()) {
+        $deb = [];
+        $deb['credkey'] = $credkey;
+        array_push($debugdata, $deb);
+    }
+
+    return array(true, $tokenkey, $token);
 }
