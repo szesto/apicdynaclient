@@ -423,6 +423,111 @@ function appcreds_dyna_client_delete($clientid, $token) {
     return false;
 }
 
+/**
+ * @param string $clientid
+ * @param array $rh
+ * @param string $token
+ * @param array &$debugdata
+ * @return array
+ * empty array means call failed
+ * registrationAccessToken key is new registration token
+ */
+function appcreds_dyna_client_update($clientid, $rh, $token, &$debugdata): array {
+
+    $deb = [];
+
+//    $deb['arg-clientid'] = $clientid;
+//    $deb['arg-rh'] = $rh;
+//    $deb['arg-token'] = $token;
+//
+//    $debugdata['appcreds-dyna-client-update'] = $deb;
+
+    if (!isset($clientid)) {
+        return [];
+    }
+
+    if (!isset($rh)) {
+        return [];
+    }
+
+    if (!isset($token)) {
+        return [];
+    }
+
+    $url = build_dyna_client_url();
+    if (!isset($url)) {
+
+//        $deb['var-url'] = 'dyna-client-url-not-set';
+//        $debugdata['appcreds-dyna-client-update'] = $deb;
+
+        return [];
+    }
+
+//    $deb['var-url'] = $url;
+//    $debugdata['appcreds-dyna-client-update'] = $deb;
+
+    if ($url[strlen($url) - 1] == '/') {
+        $url = $url . $clientid;
+    } else {
+        $url = $url . '/' . $clientid;
+    }
+
+    try {
+//        $deb['var-url'] = $url;
+
+        $client = \Drupal::httpClient();
+
+        $hdrs = [
+            'Authorization' => encode_bearer_token_header($token),
+            'Accept' => 'application/json'
+        ];
+
+        if (apic_addon_appcreds_sync_test()) {
+            $hdrs['X-IBM-Client-Id'] = apic_addon_appcreds_sync_test_x_ibm_client_id();
+        }
+
+        // To update the Client Representation perform an HTTP PUT request with the updated
+        // Client Representation to: /realms/<realm>/clients-registrations/default/<client id>.
+        $resp = $client->put($url, [
+            'json' => $rh,
+            'verify' => false,
+            'headers' => $hdrs
+        ]);
+
+        $statusCode = $resp->getStatusCode();
+        if (!is_status_code_ok($statusCode)) {
+            return [];
+        }
+
+        $b = $resp->getBody()->getContents();
+        $json = json_decode($b);
+
+//        $deb['var-json'] = $json;
+
+        $resp_token = $json->{'registrationAccessToken'};
+
+        $resp = []; // response array
+
+        if (isset($resp_token)) {
+            $resp['registrationAccessToken'] = $resp_token;
+        }
+
+//        $deb['var-resp'] = $resp;
+//        $debugdata['appcreds-dyna-client-update'] = $deb;
+
+        return $resp;
+
+    } catch (\GuzzleHttp\Exception\RequestException $e) {
+        $deb['var-err'] = $e->getMessage();
+
+        appcreds_sync_log_error($e->getMessage());
+    }
+
+    $debugdata['appcreds-dyna-client-update'] = $deb;
+
+    return [];
+}
+
 function make_registration_access_token_key($appname, $clientid) {
     return 'apic-appcreds-sync.' . $appname . '-' . $clientid;
 }
@@ -533,17 +638,86 @@ function apic_addon_appcreds_sync_apic_app_create(NodeInterface $node, $app) {
  *   The array of data returned by API Manager
  */
 function apic_addon_appcreds_sync_apic_app_update(NodeInterface $node, $app) {
+    $debugdata = [];
 
-    // get credslist for an app...
-    // for each cred in credslist update client-id with a new list of redirect-uri's
-
-    // if all data is required for update
-    // for each cred in credlist get client data
-    // update client data with new redirect-uris
-
-    if (apic_addon_appcreds_sync_test()) {
-        appcreds_post_analytics($app, '/appupdate');
+    if (!isset($app)) {
+        appcreds_sync_log_error(sprintf('%s: application input parameter not set... no app-update-sync performed...', __FUNCTION__));
+        return;
     }
+
+    // for each application create hook, application update hook is called twice.
+    // the difference between create and update is that update event has more data about application
+    // in particular app_credentials array.
+    // to avoid duplicate calls for the application create event compare 'created_at' and 'updated_at' timestamps
+    // for the application. If the difference is less than 2 seconds (configurable), it is a duplicate
+
+    $ts1 = $app['created_at'];
+    $ts2 = $app['updated_at'];
+    $dt = appcreds_calc_timestamp_diff($ts1, $ts2);
+
+    $debugdata['arg-app-created-at'] = $ts1;
+    $debugdata['arg-app-updated-at'] = $ts2;
+    $debugdata['var-dt'] = $dt;
+
+    if ($dt <= 2) {
+
+        if (apic_addon_appcreds_sync_test()) {
+            $debugdata['arg-app'] = $app;
+            appcreds_post_analytics($debugdata, '/appupdate');
+        }
+
+        return;
+    }
+
+    $appname= $app['name'];
+    if (!isset($appname)) {
+        appcreds_sync_log_error(sprintf('%s: application name input parameter not set... no app-update-sync performed...', __FUNCTION__));
+        return;
+    }
+
+    $redirect_endpoints = $app['redirect_endpoints'];
+    if (!isset($redirect_endpoints)) {
+        appcreds_sync_log_error(sprintf('%s: redirect-endpoints input parameter not set... no app-update-sync performed...', __FUNCTION__));
+        return;
+    }
+
+    $appcreds = $app['app_credentials'];
+    if (!isset($appcreds) || empty($appcreds)) {
+        appcreds_sync_log_error(sprintf('%s: app-credentials input parameter not set... no app-update-sync performed...', __FUNCTION__));
+        return;
+    }
+
+    foreach ($appcreds as $ac) {
+        $client_id = $ac['client_id'];
+        $cred_id = $ac['id'];
+
+        if (!isset($client_id)) {
+            appcreds_sync_log_error(sprintf('%s: client-id input parameter not set... no app-update-sync performed...', __FUNCTION__));
+            continue;
+        }
+
+        $rh = [];
+        $rh['redirectUris'] = $redirect_endpoints;
+
+        $cc = appcreds_client_update($appname, $client_id, $cred_id, $rh, $debugdata);
+
+        $ok = $cc[0];
+        $tokenkey = $cc[1];
+        $regtoken = $cc[2];
+
+        // debug: post input to analytics
+        if (apic_addon_appcreds_sync_test()) {
+
+            $debugdata['arg-app'] = $app;
+
+            $debugdata['var-update-rc'] = $ok;
+            $debugdata['var-reg-token-key'] = $tokenkey;
+            $debugdata['var-reg-token'] = $regtoken;
+
+            appcreds_post_analytics($debugdata, '/appupdate');
+        }
+    }
+
 }
 
 /**
@@ -722,6 +896,9 @@ function apic_addon_appcreds_sync_apic_app_creds_create(NodeInterface $node, $da
  *   The ID of the credentials
  */
 function apic_addon_appcreds_sync_apic_app_creds_update(NodeInterface $node, $data, $credId) {
+
+    // we do not track updates to the credentials object
+
     if (apic_addon_appcreds_sync_test()) {
         appcreds_post_analytics($data, '/credsupdate');
     }
@@ -1053,4 +1230,84 @@ function appcreds_client_delete($appname, $clientid, $credid, &$debugdata): arra
     }
 
     return array(true, $tokenkey, $token);
+}
+
+/**
+ * @param string $appname
+ * @param string $clientid
+ * @param string $credid
+ * @param array $rh
+ * @param array &$debugdata
+ * @return array
+ * array(boolean, $tokenkey, $token)
+ */
+function appcreds_client_update($appname, $clientid, $credid, $rh, &$debugdata): array {
+
+    $deb = [];
+
+    $deb['arg-appname'] = $appname;
+    $deb['arg-clientid'] = $clientid;
+    $deb['arg-credid'] = $credid;
+    $deb['arg-rh'] = $rh;
+
+    $tokenkey = make_registration_access_token_key($appname, $clientid);
+    $token = get_registration_access_token($tokenkey);
+
+    $deb['var-tokenkey'] = $tokenkey;
+    $deb['var-token'] = $token;
+
+    $resp = appcreds_dyna_client_update($clientid, $rh, $token,$debugdata);
+
+    $deb['var-resp'] = $resp;
+
+    $debugdata['appcreds-client-update'] = $deb;
+
+    if (empty($resp)) return array(false, "", "");
+
+    $regtoken = $resp['registrationAccessToken'];
+    if (!isset($regtoken)) {
+        appcreds_sync_log_error('@f: registration access token required for dynamic oauth client registration, app-name=@appname, client-id=@cid',
+            ['@f' => __FUNCTION__, '@appname' => $appname, '@cid' => $clientid]);
+        return array(false, "", "");
+    }
+
+    // save new registration token
+    delete_registration_access_token($tokenkey);
+    save_registration_access_token($tokenkey, $regtoken);
+
+    return array(true, $tokenkey, $regtoken);
+}
+
+/**
+ * @param string $ts1
+ * @param string $ts2
+ * @return int
+ * number of seconds
+ */
+function appcreds_calc_timestamp_diff($ts1, $ts2): int {
+
+    if (!isset($ts1) || !isset($ts2)) {
+        return 1000;
+    }
+
+    try {
+//        $dt1 = DateTime::createFromFormat(DATE_RFC3339_EXTENDED, $ts1);
+//        $dt2 = DateTime::createFromFormat(DATE_RFC3339_EXTENDED, $ts2);
+
+        $dt1 = new DateTime($ts1);
+        $dt2 = new DateTime($ts2);
+
+        $diff = $dt2->diff($dt1, true);
+        if (is_bool($diff)) {
+            // date difference returned boolean (false)
+            return 1000;
+        }
+
+        return $diff->s;
+
+    } catch (Exception $e) {
+        appcreds_sync_log_error($e->getMessage());
+    }
+
+    return 1000;
 }
